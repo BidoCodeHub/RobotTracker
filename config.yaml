@@ -1,0 +1,80 @@
+_config_path: config.yaml
+data:
+  events_format: json
+  output_root: trials
+  trajectory_flush_every: 30
+events:
+  collision_margin_mm: 50.0
+  collision_debounce_s: 1.0
+  collision_decel_ratio: 0.5
+  intervention_min_gap_s: 2.0
+  intervention_velocity_jump_mms: 400.0
+  off_track_margin_mm: 20.0
+  stop_min_duration_s: 1.0
+  stop_velocity_threshold_mms: 5.0
+homography:
+  pixel_points:
+  - - 274
+    - 167
+  - - 1682
+    - 214
+  - - 1687
+    - 913
+  - - 221
+    - 892
+  world_points:
+  - - 0.0
+    - 0.0
+  - - 2438.4
+    - 0.0
+  - - 2438.4
+    - 1219.2
+  - - 0.0
+    - 1219.2
+logging:
+  level: INFO
+  log_to_file: false
+maze:
+  length_ft: 8.0
+  length_mm: 2438.4
+  width_ft: 4.0
+  width_mm: 1219.2
+  obstacles:
+    # [x1_mm, y1_mm, x2_mm, y2_mm]  x: 0->2438.4 (8ft), y: 0->1219.2 (4ft)
+    # cell = 304.8mm (1ft), 8 cols (x) x 4 rows (y), y=0 at top
+    - [1219.2,    0.0, 1524.0,  304.8]   # col4, row0
+    - [1828.8,    0.0, 2133.6,  304.8]   # col6, row0
+    - [ 609.6,  304.8,  914.4,  609.6]   # col2, row1
+    - [ 304.8,  609.6,  609.6,  914.4]   # col1, row2
+    - [ 914.4,  609.6, 1524.0,  914.4]   # cols3-4, row2
+    - [1828.8,  609.6, 2133.6, 1219.2]   # col6, rows2-3
+perception:
+  bgs_algorithm: MOG2
+  bgs_detect_shadows: false
+  bgs_history: 200
+  bgs_var_threshold: 40
+  heading_method: ellipse
+  max_aspect_ratio: 4.0
+  area_tolerance_factor: 2.5
+  max_velocity_mms: 1500.0
+  position_smoothing_alpha: 0.4
+  max_contour_area_px: 50000
+  max_jump_mm: 200
+  max_miss_frames: 10
+  min_aspect_ratio: 0.3
+  min_contour_area_px: 500
+  min_frames_for_heading: 3
+sensor:
+  camera_index: 0
+  file_path: data_/WIN_20260225_15_07_32_Pro.mp4
+  source: file
+  target_fps: null
+visualization:
+  dashboard_refresh_s: 2.0
+  event_colors:
+    manual_intervention: '#9467bd'
+    off_track: '#8c564b'
+    stop: '#ff7f0e'
+    wall_collision: '#d62728'
+  path_color: '#1f77b4'
+  speed_smoothing_window: 15
