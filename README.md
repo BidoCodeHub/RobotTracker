@@ -59,8 +59,7 @@ Overhead USB Camera
 | Component | Recommendation |
 |---|---|
 | Overhead camera | Any USB webcam that can cover the full maze; 1080p preferred |
-| Camera mount | Tripod or ceiling mount directly above the maze centre |
-| Rover marker | High-contrast sticker or shape on top of rover to improve detection |
+| Camera mount | ceiling mount directly above the maze centre |
 | Computer | Any machine capable of running Python 3.10+ and OpenCV |
 | Network | Both operator laptop and student display must be on the same network for dashboard sharing |
 
@@ -119,7 +118,7 @@ A window will open showing the live camera feed. **Click the four corners of the
 
 The calibration tool will print four pixel coordinate pairs to the terminal and write them to `config.yaml` under `homography.pixel_points`. The `world_points` (real-world mm coordinates) are already set correctly for an 8 ft × 4 ft maze and do not need to change.
 
-> **Tip:** Place a ruler or tape measure along the maze edges before calibrating to make it easy to identify the exact corners.
+
 
 ---
 
