@@ -14,7 +14,6 @@ class EventFlag(IntFlag):
     WALL_COLLISION      = 1
     STOPPED             = 2
     MANUAL_INTERVENTION = 4
-    OFF_TRACK           = 8
 
 
 @dataclass
@@ -27,7 +26,6 @@ class RoverState:
     px:           int     # pixel coordinate (pre-transform, for debug)
     py:           int
     velocity_mms: float   # instantaneous speed mm/s
-    heading_deg:  float   # 0=East, CCW positive; -1 if unknown
     event_flags:  int     # bitmask of EventFlag values
 
     def to_dict(self) -> dict:
@@ -57,13 +55,40 @@ class StateHistory:
     def __iter__(self) -> Iterator[RoverState]:
         return iter(self._states)
 
-    def total_distance_mm(self) -> float:
+    def total_distance_mm(self, chunk_s: float = 1.0,
+                          min_step_mm: float = 30.0,
+                          max_step_mm: float = 400.0) -> float:
+        """Return accumulated travel distance, robust to jitter and rotation-in-place.
+
+        Groups frames into chunk_s-second windows and averages positions within each
+        window.  Random jitter and rotation-in-place both cancel out over ~1 second so
+        only genuine net translation shows up in the chunk-to-chunk steps.
+
+        min_step_mm: ignore steps smaller than this (residual noise after averaging).
+        max_step_mm: ignore steps larger than this (tracker teleport / glitch).
+        """
         states = list(self._states)
+        if len(states) < 2:
+            return 0.0
+
+        t0 = states[0].timestamp_s
+        chunks: dict[int, list[tuple[float, float]]] = {}
+        for s in states:
+            key = int((s.timestamp_s - t0) / chunk_s)
+            chunks.setdefault(key, []).append((s.x_mm, s.y_mm))
+
+        positions = [
+            (sum(p[0] for p in pts) / len(pts),
+             sum(p[1] for p in pts) / len(pts))
+            for _, pts in sorted(chunks.items())
+        ]
+
         total = 0.0
-        for i in range(1, len(states)):
-            dx = states[i].x_mm - states[i - 1].x_mm
-            dy = states[i].y_mm - states[i - 1].y_mm
-            total += math.hypot(dx, dy)
+        for i in range(1, len(positions)):
+            d = math.hypot(positions[i][0] - positions[i - 1][0],
+                           positions[i][1] - positions[i - 1][1])
+            if min_step_mm < d <= max_step_mm:
+                total += d
         return total
 
     def average_speed_mms(self) -> float:

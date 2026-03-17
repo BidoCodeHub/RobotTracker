@@ -59,7 +59,7 @@ class TrialLogger:
         self._csv_file = open(traj_path, "w", newline="")
         fieldnames = [
             "frame_idx", "timestamp_s", "x_mm", "y_mm",
-            "px", "py", "velocity_mms", "heading_deg", "event_flags",
+            "px", "py", "velocity_mms", "event_flags",
         ]
         self._csv_writer = csv.DictWriter(self._csv_file, fieldnames=fieldnames)
         self._csv_writer.writeheader()
@@ -97,13 +97,29 @@ class TrialLogger:
         if lock.exists():
             lock.unlink()
 
-        # Compute summary
-        total_distance = 0.0
+        # Compute summary distance using 1-second time chunks so that jitter and
+        # rotation-in-place cancel out within each window.
         import math
-        for i in range(1, len(self._states)):
-            dx = self._states[i].x_mm - self._states[i - 1].x_mm
-            dy = self._states[i].y_mm - self._states[i - 1].y_mm
-            total_distance += math.hypot(dx, dy)
+        total_distance = 0.0
+        if len(self._states) >= 2:
+            CHUNK_S   = 1.0
+            MIN_STEP  = 30.0   # mm — ignore residual noise after averaging
+            MAX_STEP  = 400.0  # mm — reject teleport glitches
+            t0 = self._states[0].timestamp_s
+            chunks: dict[int, list[tuple[float, float]]] = {}
+            for s in self._states:
+                key = int((s.timestamp_s - t0) / CHUNK_S)
+                chunks.setdefault(key, []).append((s.x_mm, s.y_mm))
+            positions = [
+                (sum(p[0] for p in pts) / len(pts),
+                 sum(p[1] for p in pts) / len(pts))
+                for _, pts in sorted(chunks.items())
+            ]
+            for i in range(1, len(positions)):
+                d = math.hypot(positions[i][0] - positions[i - 1][0],
+                               positions[i][1] - positions[i - 1][1])
+                if MIN_STEP < d <= MAX_STEP:
+                    total_distance += d
 
         duration = 0.0
         if len(self._states) >= 2:

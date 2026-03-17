@@ -235,10 +235,33 @@ The student dashboard auto-updates every 2 seconds while a trial is live.
 
 | Metric | Description |
 |---|---|
-| Distance Travelled | Total path length in feet, rotation-in-place excluded |
-| Max Speed | Peak speed recorded during the trial |
+| Duration | Total elapsed time of the trial |
+| Distance Travelled | Net path length in feet — jitter, rotation-in-place, and tracker glitches are all excluded (see [Distance Filtering](#distance-filtering)) |
+| Top Speed | Peak speed recorded during the trial |
+| Avg Speed | Mean speed across all frames |
 | Collisions | Count of wall collision events |
 | Interventions | Count of manual intervention events |
+
+---
+
+## Distance Filtering
+
+Raw per-frame position data contains two types of noise that would inflate the distance metric if accumulated directly:
+
+| Noise Type | Cause | Effect without filtering |
+|---|---|---|
+| **Jitter** | Sub-pixel centroid noise from background subtraction | ~300–600 mm of fake distance per second at 30 fps |
+| **Rotation-in-place** | Rover spinning without translating; centroid orbits the rover centre | Accumulates as apparent travel even though the rover hasn't moved |
+
+### How it is filtered
+
+Distance is computed in three layers — in the tracker, in the logger, and in the dashboard — all using the same approach:
+
+1. **1-second time-window chunking** — all frames within each second are averaged into a single position. Random jitter and rotation both cancel out over ~1 second, leaving only genuine net displacement.
+2. **30 mm dead-band** — chunk-to-chunk steps smaller than 30 mm are ignored (residual noise after averaging).
+3. **400 mm teleport cap** — chunk-to-chunk steps larger than 400 mm are also ignored (tracker glitch / lost tracking).
+
+The dashboard adds a 15-frame median pre-filter and uses 2-second chunks for an extra layer of smoothing.
 
 ---
 
@@ -281,7 +304,7 @@ data:
 
 sensor:
   source: file             # "file" or "camera"
-  file_path: data_/video.mp4
+  file_path: data_/WIN_20260225_15_07_32_Pro.mp4
   camera_index: 0          # USB camera index (0 = first camera)
 ```
 
@@ -289,7 +312,7 @@ sensor:
 
 - **Rover not detected / box appears on wrong object** → increase `min_contour_area_px` or check lighting and camera angle.
 - **Tracker loses the rover mid-run** → decrease `bgs_var_threshold` (more sensitive) or increase `max_miss_frames`.
-- **Distance is higher than expected** → decrease `position_smoothing_alpha` for more smoothing; the 2-second chunk + 40mm dead-band in the dashboard also filters rotation drift.
+- **Distance is higher than expected** → decrease `position_smoothing_alpha` for more aggressive EMA smoothing; the 1-second chunking + 30 mm dead-band automatically filters jitter and rotation-in-place.
 - **Auto-collision events fire incorrectly** → increase `collision_debounce_s` or switch to **Manual-only** collision mode.
 
 ---
@@ -374,11 +397,12 @@ The tracker lost the rover. Common causes and fixes:
 - Confirm `streamlit run dashboard.py` is running in a separate terminal
 - The dashboard auto-refreshes every 2 seconds — wait a moment after starting a trial
 - Ensure both terminals are pointing to the same project directory (same `trials/` folder)
+- **Stuck on a stale "live" trial** — if the Operator Panel was force-quit mid-trial, a `recording.lock` file may have been left behind. The dashboard treats any lock file older than 30 seconds as stale and ignores it automatically. If the dashboard is still stuck, delete the lock file manually: `rm trials/<trial_name>/recording.lock`
 
 ### Distance is unrealistically high
 
-- Rover may have been left rotating in place — the 2-second chunk + 40 mm dead-band filter suppresses this but very fast rotation can still accumulate a small amount
-- Reduce `position_smoothing_alpha` in `config.yaml` (e.g. to 0.25) for more aggressive smoothing
+- The system automatically filters out jitter and rotation-in-place using 1-second time-window chunking with a 30 mm dead-band (see [Distance Filtering](#distance-filtering))
+- If distance is still inflated, reduce `position_smoothing_alpha` in `config.yaml` (e.g. to 0.25) for more aggressive EMA smoothing on the raw centroid position
 
 ### Calibration / homography looks wrong (path is skewed or stretched)
 
@@ -399,18 +423,30 @@ robottracker/
 │
 ├── rover_tracker/
 │   ├── perception/
-│   │   ├── tracker.py      ← Background subtraction, blob detection, EMA smoothing
-│   │   └── homography.py   ← Pixel ↔ world coordinate transform
+│   │   ├── tracker.py      ← MOG2/KNN background subtraction, MeanShift tracking,
+│   │   │                      adaptive EMA smoothing; reference images pre-loaded at
+│   │   │                      startup; BGS model is fully reset between trials
+│   │   ├── homography.py   ← Pixel ↔ world coordinate transform
+│   │   ├── background1new.jpg  ← Reference background for initial detection
+│   │   └── background_mat.jpg  ← Maze boundary mask for initial detection
 │   ├── events/
 │   │   └── event_detector.py   ← Collision, stop, intervention detection
 │   ├── state/
-│   │   └── rover_state.py  ← RoverState dataclass and StateHistory
+│   │   └── rover_state.py  ← RoverState dataclass; StateHistory with
+│   │                          noise-filtered total_distance_mm()
 │   ├── data/
-│   │   └── trial_logger.py ← CSV/JSON logging, recording.lock management
+│   │   └── trial_logger.py ← CSV/JSON logging, recording.lock management;
+│   │                          distance computed with 1-second chunking
+│   ├── visualization/
+│   │   └── dashboard.py    ← Streamlit dashboard; stale-lock detection;
+│   │                          2-second chunking + dead-band distance filtering
 │   └── sensor/             ← Camera / video file input abstraction
 │
-├── tests/                  ← pytest unit tests
-│   └── test_event_detector.py
+├── tests/                  ← pytest unit tests (24 tests, all passing)
+│   ├── test_event_detector.py
+│   ├── test_homography.py
+│   ├── test_state.py
+│   └── test_trial_logger.py
 │
 ├── data_/                  ← Sample reference videos (not committed to git)
 └── trials/                 ← Trial output folders (not committed to git)

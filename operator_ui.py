@@ -383,6 +383,7 @@ class OperatorApp:
         self._root.after(0, self._cam_connected)
 
         # For file source: show first frame as frozen preview, wait for Start Trial
+        preview = None
         if source == "file":
             ret, preview = cap.read()
             if ret:
@@ -392,8 +393,13 @@ class OperatorApp:
                 time.sleep(0.05)
             # Reset to beginning so trial plays from frame 0
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        else:
+            # Live camera: read one frame to seed initialDetection
+            ret, preview = cap.read()
 
         frame_n = 0
+        if preview is not None:
+            tracker.initialDetection(preview, 0)
         while not self._stop_cam.is_set():
             # For file: pause between trials (after a trial ends, hold on last frame)
             if source == "file" and not self._running.is_set():
@@ -523,7 +529,7 @@ class OperatorApp:
         self._logger   = TrialLogger(cfg_copy, trial_id=trial_id)
         self._logger.open(cfg_copy)
         self._history  = StateHistory()
-        self._detector = EventDetector(self._cfg)
+        self._detector = EventDetector(cfg_copy)
         self._trial_t0 = time.time()
         self._running.set()
 
@@ -532,7 +538,7 @@ class OperatorApp:
                               activebackground="#7a0000")
         self._name_entry.config(state="disabled")
         self._write_log(f"▶  {name}  —  trial started", "info")
-
+        
     def _stop_trial(self):
         if not self._running.is_set():
             return

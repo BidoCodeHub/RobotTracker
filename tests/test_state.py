@@ -11,7 +11,7 @@ def make_state(i, x=100.0, y=100.0, vel=50.0):
     return RoverState(
         frame_idx=i, timestamp_s=i * 0.1,
         x_mm=x, y_mm=y, px=0, py=0,
-        velocity_mms=vel, heading_deg=0.0,
+        velocity_mms=vel,
         event_flags=EventFlag.NONE,
     )
 
@@ -41,10 +41,12 @@ def test_state_history_append_and_last():
 
 def test_state_history_total_distance():
     h = StateHistory()
-    # Three states in a line: (0,0), (100,0), (200,0)
-    h.append(RoverState(0, 0.0, 0.0, 0.0, 0, 0, 0.0, 0.0, EventFlag.NONE))
-    h.append(RoverState(1, 0.1, 100.0, 0.0, 1, 0, 0.0, 0.0, EventFlag.NONE))
-    h.append(RoverState(2, 0.2, 200.0, 0.0, 2, 0, 0.0, 0.0, EventFlag.NONE))
+    # Three states each 1 second apart so each lands in its own 1-second chunk.
+    # Positions form a straight line: (0,0) → (100,0) → (200,0)
+    # Each chunk step is 100 mm — within the (30, 400] acceptance band.
+    h.append(RoverState(0, 0.0,   0.0, 0.0, 0, 0, 0.0, EventFlag.NONE))
+    h.append(RoverState(1, 1.0, 100.0, 0.0, 1, 0, 0.0, EventFlag.NONE))
+    h.append(RoverState(2, 2.0, 200.0, 0.0, 2, 0, 0.0, EventFlag.NONE))
     assert math.isclose(h.total_distance_mm(), 200.0, rel_tol=1e-6)
 
 

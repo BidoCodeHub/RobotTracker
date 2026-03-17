@@ -49,11 +49,14 @@ def _compute_stats(traj: pd.DataFrame, events: list[dict]) -> dict:
     y_c = y_filt.groupby(groups).mean()
 
     # Dead-band: rotation-in-place drifts < 40 mm per 2-s chunk; real translation exceeds it.
+    # Max-cap: if a chunk-to-chunk step is implausibly large (> 400 mm in 2 s) it is a
+    # tracker glitch / teleport — skip it entirely so it doesn't inflate distance.
     MIN_STEP_MM = 40.0
+    MAX_STEP_MM = 400.0
     dist_mm = sum(
         d for i in range(1, len(x_c))
-        if (d := math.hypot(x_c.iloc[i] - x_c.iloc[i - 1],
-                            y_c.iloc[i] - y_c.iloc[i - 1])) > MIN_STEP_MM
+        if MIN_STEP_MM < (d := math.hypot(x_c.iloc[i] - x_c.iloc[i - 1],
+                                           y_c.iloc[i] - y_c.iloc[i - 1])) <= MAX_STEP_MM
     )
     # Smooth velocity before computing stats to remove tracking noise spikes
     vel_smooth = traj["velocity_mms"].rolling(10, min_periods=1).mean()
@@ -145,9 +148,16 @@ def run_dashboard():
 
     trial_names = [d.name for d in trial_dirs]
 
-    # Detect live trial: recording.lock exists while operator UI is recording
+    # Detect live trial: recording.lock exists AND trajectory is actively being written.
+    # The 30-second mtime check guards against stale locks left by a crashed process.
     def _is_live(d: Path) -> bool:
-        return (d / "recording.lock").exists()
+        import time as _time
+        lock = d / "recording.lock"
+        if not lock.exists():
+            return False
+        traj = d / "trajectory.csv"
+        ref  = traj if traj.exists() else lock
+        return (_time.time() - ref.stat().st_mtime) < 30
 
     live_dir = next((d for d in trial_dirs if _is_live(d)), None)
     is_live  = live_dir is not None
@@ -215,7 +225,6 @@ def run_dashboard():
     event_colors = vcfg.get("event_colors", {
         "wall_collision":      "#d62728",
         "manual_intervention": "#9467bd",
-        "off_track":           "#8c564b",
     })
     maze_x_max   = cfg.get("maze", {}).get("length_mm", 2438.4) * MM_TO_FT
     maze_y_max   = cfg.get("maze", {}).get("width_mm",  1219.2) * MM_TO_FT

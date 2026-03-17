@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import math
+import os
 
 import cv2
 import numpy as np
+
+_PERCEPTION_DIR = os.path.dirname(os.path.abspath(__file__))
 
 from ..state.rover_state import EventFlag, RoverState
 from .homography import HomographyTransform
@@ -14,7 +17,7 @@ from .homography import HomographyTransform
 class RoverTracker:
     """
     Stateful rover tracker. Call process_frame() for each video frame.
-    Owns background subtractor, contour filtering, and heading estimation.
+    Owns background subtractor, contour filtering.
     """
 
     def __init__(self, cfg: dict, homography: HomographyTransform):
@@ -22,9 +25,20 @@ class RoverTracker:
 
         # Background subtractor
         algo = pcfg.get("bgs_algorithm", "MOG2").upper()
-        history = pcfg.get("bgs_history", 200)
-        threshold = pcfg.get("bgs_var_threshold", 40)
+        history = pcfg.get("bgs_history", 400)
+        threshold = pcfg.get("bgs_var_threshold", 200)
         shadows = pcfg.get("bgs_detect_shadows", False)
+        bright_threshold = pcfg.get("bright_threshold", 700)
+        term_crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 1, 1)
+        lower_black = np.array([0, 0, 0], dtype=np.uint8)
+        upper_black = np.array([50, 50, 50], dtype=np.uint8)
+        kernal = np.ones((99, 99), np.float32) / 9801
+
+        # Store BGS params so reset() can recreate the model between trials
+        self._bgs_algo      = algo
+        self._bgs_history   = history
+        self._bgs_threshold = threshold
+        self._bgs_shadows   = shadows
 
         if algo == "KNN":
             self._bgs = cv2.createBackgroundSubtractorKNN(
@@ -35,6 +49,16 @@ class RoverTracker:
                 history=history, varThreshold=threshold, detectShadows=shadows
             )
 
+        # Pre-load initial-detection reference images once (not on every lost-track event)
+        bg_path  = os.path.join(_PERCEPTION_DIR, "background1new.jpg")
+        bm_path  = os.path.join(_PERCEPTION_DIR, "background_mat.jpg")
+        self._bg1   = cv2.imread(bg_path)
+        _bm_raw     = cv2.imread(bm_path, cv2.IMREAD_GRAYSCALE)
+        if _bm_raw is not None:
+            _, self._bmask = cv2.threshold(_bm_raw, 127, 255, cv2.THRESH_BINARY)
+        else:
+            self._bmask = None
+
         # Contour filtering thresholds
         self._min_area: int = pcfg.get("min_contour_area_px", 500)
         self._max_area: int = pcfg.get("max_contour_area_px", 50000)
@@ -44,17 +68,22 @@ class RoverTracker:
         # Area-consistency lock: tracks rover's expected size to reject hands/arms
         self._area_max_factor: float = pcfg.get("area_tolerance_factor", 2.5)
         self._area_alpha: float = 0.3          # EMA decay for size estimate
-        self._rover_area: float | None = None  # learned on first detection
-
-        # Heading
-        self._heading_method: str = pcfg.get("heading_method", "ellipse")
-        self._min_frames_heading: int = pcfg.get("min_frames_for_heading", 3)
+        self._size: int = 200
 
         # Tracking continuity
         self._max_miss: int = pcfg.get("max_miss_frames", 10)
         self._max_jump_mm: float = pcfg.get("max_jump_mm", 300.0)
         # Physical velocity cap — rejects spikes from tracking noise
-        self._max_velocity_mms: float = pcfg.get("max_velocity_mms", 1500.0)  # ~5 ft/s
+        self._max_velocity_mms: float = pcfg.get("max_velocity_mms", 1500.0)
+
+        # MeanShift
+        self._term_crit = term_crit
+        self._bright_threshold = bright_threshold
+
+        # Initial detection
+        self._lower_black = lower_black
+        self._upper_black = upper_black
+        self._kernal = kernal
 
         # Position smoothing — EMA dampens frame-to-frame centroid jitter
         self._pos_alpha: float = pcfg.get("position_smoothing_alpha", 0.4)
@@ -67,15 +96,14 @@ class RoverTracker:
         self._maze_pixels: np.ndarray = np.array(
             cfg.get("homography", {}).get("pixel_points", []), dtype=np.int32
         )
-        self._roi_mask: np.ndarray | None = None  # built on first frame
+        self._roi_mask: np.ndarray | None = None
 
         # Internal state
         self._last_state: RoverState | None = None
         self._miss_count: int = 0
         self._frame_count: int = 0
         self._debug_frame: np.ndarray | None = None
-        # Last raw (pre-EMA) world position — used by teleport guard so the
-        # jump check is not fooled by the lagged smoothed position.
+        self._lost_track: int = 0
         self._last_raw_x: float | None = None
         self._last_raw_y: float | None = None
 
@@ -88,6 +116,54 @@ class RoverTracker:
             # No valid corners — allow entire frame (fallback)
             mask[:] = 255
         return mask
+
+    def initialDetection(self, frame: np.ndarray, timestamp_s: float):
+        background1 = self._bg1
+        bmask       = self._bmask
+        if background1 is None or bmask is None:
+            # Fallback if reference images are missing: centre of frame
+            h, w = frame.shape[:2]
+            x1 = w // 2 - self._size // 2
+            y1 = h // 2 - self._size // 2
+            bbox1 = (x1, y1, self._size, self._size)
+            x_mm, y_mm = self._homography.pixel_to_world(x1, y1)
+            state = RoverState(
+                frame_idx=self._frame_count,
+                timestamp_s=timestamp_s,
+                x_mm=x_mm, y_mm=y_mm,
+                px=int(x1), py=int(y1),
+                velocity_mms=0,
+                event_flags=EventFlag.NONE,
+            )
+            self._last_state = state
+            return bbox1
+
+        diff1 = cv2.absdiff(background1, frame)
+        dim = cv2.inRange(diff1, self._lower_black, self._upper_black)
+
+        frame = frame.copy()
+        frame[dim > 0] = (0, 0, 0)
+        frame = cv2.bitwise_and(frame, frame, mask=bmask)
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frame = cv2.filter2D(frame, -1, self._kernal)
+
+        y1, x1 = np.unravel_index(frame.argmax(), frame.shape)
+        x1 = x1 - (int)(self._size / 2)
+        y1 = y1 - (int)(self._size / 2)
+        bbox1 = (x1, y1, self._size, self._size)
+        x_mm, y_mm = self._homography.pixel_to_world(x1, y1)
+        state = RoverState(
+            frame_idx=self._frame_count,
+            timestamp_s=timestamp_s,
+            x_mm=x_mm,
+            y_mm=y_mm,
+            px=int(x1),
+            py=int(y1),
+            velocity_mms=0,
+            event_flags=EventFlag.NONE,
+        )
+        self._last_state = state
+        return bbox1
 
     def process_frame(self, frame: np.ndarray, timestamp_s: float) -> RoverState | None:
         """Run the full perception pipeline on one frame."""
@@ -103,58 +179,54 @@ class RoverTracker:
             cv2.polylines(debug, [self._maze_pixels], isClosed=True,
                           color=(0, 255, 255), thickness=2)
 
-        fg_mask = self._bgs.apply(frame)
+        fg_mask = self._bgs.apply(debug)
         # Remove shadows (value 127) and noise
         _, fg_mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
-        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel)  # fill holes → stable centroid
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel)
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_DILATE, kernel)
 
         # Mask out everything outside the maze — ignores people walking around it
         fg_mask = cv2.bitwise_and(fg_mask, self._roi_mask)
 
-        contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        last_px = self._last_state.px if self._last_state is not None else None
-        last_py = self._last_state.py if self._last_state is not None else None
-        best = self._select_best_contour(contours, last_px, last_py)
-
-        if best is None:
-            self._miss_count += 1
-            if self._miss_count > self._max_miss:
-                self._last_state = None
-            self._debug_frame = debug
-            return None
-
-        self._miss_count = 0
-
-        # Update rover area EMA — only when not in a miss streak (confident detection)
-        detected_area = cv2.contourArea(best)
-        if self._rover_area is None:
-            self._rover_area = detected_area
+        if self._last_state is None:
+            self.initialDetection(frame, timestamp_s)
+        bbox1 = ((int)(self._last_state.px - self._size / 2),
+                 (int)(self._last_state.py - self._size / 2),
+                 self._size, self._size)
+        _, bbox1 = cv2.meanShift(fg_mask, bbox1, self._term_crit)
+        oldx1, oldy1 = ((int)(self._last_state.px - self._size / 2),
+                        (int)(self._last_state.py - self._size / 2))
+        x1, y1, _, _ = bbox1
+        x1 = (int)(x1)
+        y1 = (int)(y1)
+        # Clamp bbox to frame bounds before pixel access
+        h_frame, w_frame = fg_mask.shape[:2]
+        x1 = max(0, min(x1, w_frame - self._size))
+        y1 = max(0, min(y1, h_frame - self._size))
+        bright = 0
+        for xi in range(self._size):
+            for yi in range(self._size):
+                if fg_mask[yi + y1][xi + x1] > 0:
+                    bright += 1
+        if bright < self._bright_threshold:
+            x1, y1 = oldx1, oldy1
+        if bright < 5:
+            self._lost_track += 1
         else:
-            self._rover_area = (self._area_alpha * detected_area
-                                + (1 - self._area_alpha) * self._rover_area)
+            self._lost_track = 0
+        if self._lost_track >= 30:
+            self._lost_track = 0
+            x1, y1, _, _ = self.initialDetection(frame, timestamp_s)
 
-        cx, cy, heading = self._extract_pose(best)
+        cx, cy = (int)(x1 + 0.5 * self._size), (int)(y1 + 0.5 * self._size)
 
-        # Teleport guard — compare raw detected positions across consecutive frames.
-        # Using smoothed positions here would incorrectly flag fast movement because
-        # the adaptive EMA deliberately lags during rotation / slow motion.
         x_mm, y_mm = self._homography.pixel_to_world(cx, cy)
-        if self._last_raw_x is not None:
-            jump = math.hypot(x_mm - self._last_raw_x, y_mm - self._last_raw_y)
-            if jump > self._max_jump_mm:
-                self._miss_count += 1
-                self._debug_frame = debug
-                return None
-        self._last_raw_x, self._last_raw_y = x_mm, y_mm
 
         # Adaptive position EMA — alpha scales with how far the raw centroid has moved
-        # from the current smooth estimate.  When the rover rotates in place the centroid
-        # circles within ~30 mm of the true centre; translation moves it much further.
-        # Low alpha  → barely follows small jitter (rotation / noise).
-        # Full alpha → responds quickly to genuine displacement (translation).
+        # from the current smooth estimate.  Low alpha → barely follows small jitter
+        # (rotation / noise).  Full alpha → responds quickly to genuine displacement.
         if self._smooth_x is None:
             self._smooth_x, self._smooth_y = x_mm, y_mm
         else:
@@ -176,9 +248,6 @@ class RoverTracker:
                 # Clamp to physical maximum — spikes above this are tracking noise
                 if velocity_mms > self._max_velocity_mms:
                     velocity_mms = self._last_state.velocity_mms
-            if self._heading_method == "delta_position" and velocity_mms > 1.0:
-                heading = math.degrees(math.atan2(-(y_mm - self._last_state.y_mm),
-                                                   x_mm - self._last_state.x_mm))
 
         state = RoverState(
             frame_idx=self._frame_count,
@@ -188,21 +257,12 @@ class RoverTracker:
             px=int(cx),
             py=int(cy),
             velocity_mms=velocity_mms,
-            heading_deg=heading,
             event_flags=EventFlag.NONE,
         )
         self._last_state = state
 
         # Annotate debug frame
-        rect = cv2.boundingRect(best)
-        cv2.rectangle(debug, (rect[0], rect[1]),
-                      (rect[0] + rect[2], rect[1] + rect[3]), (0, 255, 0), 2)
-        cv2.circle(debug, (int(cx), int(cy)), 5, (0, 0, 255), -1)
-        if heading != -1:
-            length = 40
-            ex = int(cx + length * math.cos(math.radians(heading)))
-            ey = int(cy - length * math.sin(math.radians(heading)))
-            cv2.arrowedLine(debug, (int(cx), int(cy)), (ex, ey), (255, 0, 0), 2)
+        cv2.rectangle(debug, (x1, y1), (x1 + self._size, y1 + self._size), (0, 255, 0), 2)
         self._debug_frame = debug
         return state
 
@@ -210,19 +270,8 @@ class RoverTracker:
         """Return the best contour passing area/aspect-ratio filters.
 
         Two-stage defense against hands/arms entering the maze:
-
-        1. Area-consistency filter (primary): once the rover's size is learned,
-           reject any blob whose area exceeds `area_tolerance_factor` × expected
-           rover area.  A human hand is typically 3-10× larger than the rover
-           so it is filtered out even when it is adjacent to the rover.
-
-        2. Proximity lock (secondary): among the remaining size-consistent
-           candidates, pick the one closest to the rover's last known pixel
-           position, preventing any stray similarly-sized object from stealing
-           the track.
-
-        Without a prior position the largest valid candidate is returned so the
-        initial acquisition still works.
+        1. Area-consistency filter: reject blobs larger than area_tolerance_factor × rover area.
+        2. Proximity lock: pick the candidate closest to the last known pixel position.
         """
         candidates = []
         for c in contours:
@@ -240,15 +289,6 @@ class RoverTracker:
         if not candidates:
             return None
 
-        # Stage 1 — area-consistency filter (active once rover size is learned)
-        if self._rover_area is not None:
-            max_allowed = self._rover_area * self._area_max_factor
-            size_consistent = [c for c in candidates
-                               if cv2.contourArea(c) <= max_allowed]
-            # Only apply the filter if it leaves at least one candidate
-            if size_consistent:
-                candidates = size_consistent
-
         # Stage 2 — proximity lock
         if last_px is not None and last_py is not None:
             def _dist(c):
@@ -264,38 +304,40 @@ class RoverTracker:
         # No prior position — pick the largest valid contour for initial acquisition
         return max(candidates, key=cv2.contourArea)
 
-    def _extract_pose(self, contour: np.ndarray) -> tuple[float, float, float]:
-        """Return (cx, cy, heading_deg). heading=-1 if undetermined."""
+    def _extract_pose(self, contour: np.ndarray) -> tuple[float, float]:
+        """Return (cx, cy)."""
         M = cv2.moments(contour)
         if M["m00"] == 0:
             x, y, w, h = cv2.boundingRect(contour)
-            return x + w / 2, y + h / 2, -1.0
-
+            return x + w / 2, y + h / 2
         cx = M["m10"] / M["m00"]
         cy = M["m01"] / M["m00"]
-        heading = -1.0
-
-        if self._heading_method == "ellipse" and len(contour) >= 5:
-            try:
-                (_, _), (_, _), angle = cv2.fitEllipse(contour)
-                # OpenCV angle is CCW from vertical; convert to CCW from East
-                heading = 90.0 - angle
-            except cv2.error:
-                pass
-
-        return cx, cy, heading
+        return cx, cy
 
     def get_debug_frame(self) -> np.ndarray | None:
         return self._debug_frame
 
     def reset(self) -> None:
-        """Reset BGS history and tracking state (call between trials)."""
-        self._last_state = None
-        self._miss_count = 0
+        """Reset BGS model and tracking state (call between trials)."""
+        # Recreate the background subtractor so the previous trial's background
+        # model does not bleed into the new trial.
+        if self._bgs_algo == "KNN":
+            self._bgs = cv2.createBackgroundSubtractorKNN(
+                history=self._bgs_history,
+                dist2Threshold=self._bgs_threshold,
+                detectShadows=self._bgs_shadows,
+            )
+        else:
+            self._bgs = cv2.createBackgroundSubtractorMOG2(
+                history=self._bgs_history,
+                varThreshold=self._bgs_threshold,
+                detectShadows=self._bgs_shadows,
+            )
+        self._last_state  = None
+        self._miss_count  = 0
         self._frame_count = 0
-        self._rover_area = None
-        self._smooth_x = None
-        self._smooth_y = None
-        self._last_raw_x = None
-        self._last_raw_y = None
-        self._bgs = self._bgs  # BGS history resets on next apply() call after recreate
+        self._smooth_x    = None
+        self._smooth_y    = None
+        self._last_raw_x  = None
+        self._last_raw_y  = None
+        self._lost_track  = 0
