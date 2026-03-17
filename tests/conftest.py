@@ -42,8 +42,6 @@ MOCK_CFG = {
         "max_contour_area_px": 50000,
         "min_aspect_ratio": 0.3,
         "max_aspect_ratio": 4.0,
-        "heading_method": "ellipse",
-        "min_frames_for_heading": 3,
         "max_miss_frames": 10,
         "max_jump_mm": 300,
     },
@@ -53,7 +51,6 @@ MOCK_CFG = {
         "stop_min_duration_s": 1.0,
         "intervention_velocity_jump_mms": 400.0,
         "intervention_min_gap_s": 2.0,
-        "off_track_margin_mm": 20.0,
     },
     "data": {
         "output_root": "trials_test",
@@ -108,7 +105,6 @@ def state_sequence() -> list[RoverState]:
             px=i * 5,
             py=100,
             velocity_mms=100.0,
-            heading_deg=0.0,
             event_flags=EventFlag.NONE,
         ))
     return states

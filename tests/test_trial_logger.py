@@ -15,7 +15,7 @@ def _state(i, x=600.0, y=1200.0):
     return RoverState(
         frame_idx=i, timestamp_s=i * 0.1,
         x_mm=x, y_mm=y, px=0, py=0,
-        velocity_mms=50.0, heading_deg=0.0,
+        velocity_mms=50.0,
         event_flags=EventFlag.NONE,
     )
 

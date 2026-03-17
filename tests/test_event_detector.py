@@ -14,7 +14,7 @@ def _state(x, y, vel=50.0, t=0.0, frame=0):
     return RoverState(
         frame_idx=frame, timestamp_s=t,
         x_mm=x, y_mm=y, px=0, py=0,
-        velocity_mms=vel, heading_deg=0.0,
+        velocity_mms=vel,
         event_flags=EventFlag.NONE,
     )
 
@@ -47,13 +47,6 @@ def test_no_collision_at_center(detector):
     history = StateHistory()
     events = detector.update(state, history)
     assert not any(e.event_type == "wall_collision" for e in events)
-
-
-def test_off_track(detector):
-    state = _state(x=-100.0, y=600.0)
-    history = StateHistory()
-    events = detector.update(state, history)
-    assert any(e.event_type == "off_track" for e in events)
 
 
 def test_stop_detection(detector):
