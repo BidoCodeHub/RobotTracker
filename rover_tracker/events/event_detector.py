@@ -1,4 +1,4 @@
-"""Event detection: wall collisions, stops, manual intervention, off-track."""
+"""Event detection: wall collisions, stops, manual intervention."""
 
 from __future__ import annotations
 
@@ -49,7 +49,6 @@ class EventDetector:
         self._stop_min_dur: float = ecfg.get("stop_min_duration_s", 1.0)
         self._intervention_jump: float = ecfg.get("intervention_velocity_jump_mms", 400.0)
         self._intervention_gap: float = ecfg.get("intervention_min_gap_s", 2.0)
-        self._off_track_margin: float = ecfg.get("off_track_margin_mm", 20.0)
 
         # Debounce state
         self._stop_start_t: float | None = None
@@ -61,10 +60,6 @@ class EventDetector:
         events: list[DetectedEvent] = []
 
         ev = self._check_wall_collision(state, history)
-        if ev:
-            events.append(ev)
-
-        ev = self._check_off_track(state)
         if ev:
             events.append(ev)
 
@@ -82,7 +77,6 @@ class EventDetector:
                 "wall_collision":      EventFlag.WALL_COLLISION,
                 "stop":                EventFlag.STOPPED,
                 "manual_intervention": EventFlag.MANUAL_INTERVENTION,
-                "off_track":           EventFlag.OFF_TRACK,
             }
             flag = flag_map.get(e.event_type, EventFlag.NONE)
             # RoverState is a dataclass — update event_flags
@@ -138,19 +132,6 @@ class EventDetector:
             y_mm=state.y_mm,
             metadata={"wall": wall},
         )
-
-    def _check_off_track(self, state: RoverState) -> DetectedEvent | None:
-        m = self._off_track_margin
-        if (state.x_mm < -m or state.x_mm > self._maze_x_max + m or
-                state.y_mm < -m or state.y_mm > self._maze_y_max + m):
-            return DetectedEvent(
-                event_type="off_track",
-                timestamp_s=state.timestamp_s,
-                frame_idx=state.frame_idx,
-                x_mm=state.x_mm,
-                y_mm=state.y_mm,
-            )
-        return None
 
     def _check_stop(self, state: RoverState, history: StateHistory) -> DetectedEvent | None:
         is_stopped = state.velocity_mms < self._stop_vel
