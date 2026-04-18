@@ -462,4 +462,4 @@ python3 -m pytest tests/ -v
 
 ---
 
-*RobotTracker – MIE444 Mechatronics Engineering Design*
+*RobotTracker – MIE491 Capstone Design (built for MIE444 Mechatronics Engineering Design rover competitions)*
